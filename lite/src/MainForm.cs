@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Drawing;
 using System.IO;
@@ -8,13 +8,26 @@ using System.Windows.Forms;
 
 namespace ExcelBatchRename
 {
+    /// <summary>
+    /// 日志配色。
+    /// 原则：白底上"黄色前景"几乎看不清，所以黄色系一律用浅底 + 深字；
+    /// 危险类用高饱和深红并加粗，保证一眼能扫到。
+    /// </summary>
     internal static class Colors
     {
-        public static readonly Color Miss = Color.FromArgb(0xD3, 0x2F, 0x2F);
-        public static readonly Color Dup = Color.FromArgb(0xF5, 0x7C, 0x00);
-        public static readonly Color Ok = Color.FromArgb(0x2E, 0x7D, 0x32);
-        public static readonly Color Info = Color.FromArgb(0x15, 0x65, 0xC0);
-        public static readonly Color Normal = Color.FromArgb(0x33, 0x33, 0x33);
+        // ---- 前景色 ----
+        public static readonly Color Miss = Color.FromArgb(0xB0, 0x00, 0x20);   // 深红（错误/缺失）
+        public static readonly Color Dup = Color.FromArgb(0x8A, 0x4B, 0x00);    // 深琥珀（重名）
+        public static readonly Color Ok = Color.FromArgb(0x0B, 0x6B, 0x1F);     // 深绿（成功）
+        public static readonly Color Info = Color.FromArgb(0x00, 0x3D, 0x7A);   // 深蓝（提示）
+        public static readonly Color Warn = Color.FromArgb(0x7A, 0x4F, 0x01);   // 深棕（警告，配浅黄底）
+        public static readonly Color Normal = Color.FromArgb(0x1A, 0x1A, 0x1A); // 近黑
+
+        // ---- 背景色（Color.Empty = 不填）----
+        public static readonly Color WarnBack = Color.FromArgb(0xFF, 0xF4, 0xCE); // 浅黄底
+        public static readonly Color MissBack = Color.FromArgb(0xFD, 0xE7, 0xE9); // 浅红底
+        public static readonly Color DupBack = Color.FromArgb(0xFF, 0xF0, 0xD8);  // 浅橙底
+        public static readonly Color None = Color.Empty;
     }
 
     /// <summary>UI 日志与进度：后台线程只入队，界面计时器负责刷新</summary>
@@ -23,6 +36,10 @@ namespace ExcelBatchRename
         private readonly ConcurrentQueue<LogItem> _queue = new ConcurrentQueue<LogItem>();
         private int _progCur;
         private int _progMax;
+
+        // 粗体字体缓存：Font 是 GDI 对象，每次 new 会泄漏句柄
+        private Font _boldFont;
+        private Font _boldFontSource;
 
         public RichTextBox Box;
         public ProgressBar Bar;
@@ -61,12 +78,16 @@ namespace ExcelBatchRename
                 Box.SelectionStart = Box.TextLength;
                 Box.SelectionLength = 0;
                 Box.SelectionColor = TagColor(item.Tag);
+                Box.SelectionBackColor = TagBackColor(item.Tag);
+                Box.SelectionFont = TagFont(item.Tag);
                 Box.AppendText(item.Text + Environment.NewLine);
                 changed = true;
             }
             if (changed)
             {
                 Box.SelectionColor = Colors.Normal;
+                Box.SelectionBackColor = Box.BackColor;
+                Box.SelectionFont = Box.Font;
                 Box.SelectionStart = Box.TextLength;
                 Box.ScrollToCaret();
             }
@@ -85,7 +106,31 @@ namespace ExcelBatchRename
             if (tag == "dup") return Colors.Dup;
             if (tag == "ok") return Colors.Ok;
             if (tag == "info") return Colors.Info;
+            if (tag == "warn") return Colors.Warn;
             return Colors.Normal;
+        }
+
+        private static Color TagBackColor(string tag)
+        {
+            if (tag == "miss") return Colors.MissBack;
+            if (tag == "dup") return Colors.DupBack;
+            if (tag == "warn") return Colors.WarnBack;
+            return Colors.None;
+        }
+
+        /// <summary>错误和警告加粗，成功/提示保持常规，避免整屏都是粗体</summary>
+        private Font TagFont(string tag)
+        {
+            if (Box == null) return null;
+            if (tag != "miss" && tag != "warn") return Box.Font;
+
+            if (_boldFont == null || _boldFontSource != Box.Font)
+            {
+                if (_boldFont != null) _boldFont.Dispose();
+                _boldFont = new Font(Box.Font, FontStyle.Bold);
+                _boldFontSource = Box.Font;
+            }
+            return _boldFont;
         }
 
         public string AllText()
@@ -99,6 +144,12 @@ namespace ExcelBatchRename
             while (_queue.TryDequeue(out ignored)) { }
             if (Box != null) Box.Clear();
             ResetProgress();
+        }
+
+        /// <summary>释放缓存的 GDI 资源，窗体关闭时调用</summary>
+        public void DisposeResources()
+        {
+            if (_boldFont != null) { _boldFont.Dispose(); _boldFont = null; _boldFontSource = null; }
         }
     }
 
@@ -156,73 +207,76 @@ namespace ExcelBatchRename
             _timer.Start();
         }
 
+        // 内容最大宽度：窗口超宽时左右留白，避免输入框被拉成超长条
+        private const int ContentMaxWidth = 1020;
+
         private void BuildUi()
         {
             TableLayoutPanel root = UiKit.Root();
-            root.AutoScroll = true;
             Controls.Add(root);
 
             // ---------- 顶部：文件 / 文件夹 / 列 / 行范围 ----------
-            _txtExcel = UiKit.Input(520);
-            _txtFolder = UiKit.Input(520);
+            _txtExcel = UiKit.Input(0);
+            _txtFolder = UiKit.Input(0);
             _cbPrefix = new ComboBox();
             _cbPrefix.DropDownStyle = ComboBoxStyle.DropDownList;
-            _cbPrefix.Width = 260;
+            _cbPrefix.Anchor = AnchorStyles.Left;
             _cbPrefix.Margin = new Padding(0, 4, 6, 4);
             _cbOld = new ComboBox();
             _cbOld.DropDownStyle = ComboBoxStyle.DropDownList;
-            _cbOld.Width = 260;
+            _cbOld.Anchor = AnchorStyles.Left;
             _cbOld.Margin = new Padding(0, 4, 6, 4);
             _txtStartRow = UiKit.Input(56);
             _txtStartRow.Text = "2";
             _txtEndRow = UiKit.Input(56);
 
-            FlowLayoutPanel top = UiKit.Column(
-                UiKit.Row(UiKit.Text("1. 选择 Excel 文件（.xlsx）：", 0), _txtExcel,
-                          UiKit.Button("浏览…", delegate { BrowseExcel(); })),
-                UiKit.Row(UiKit.Text("2. 选择文件所在文件夹：", 0), _txtFolder,
-                          UiKit.Button("浏览…", delegate { BrowseFolder(); })),
-                UiKit.Row(UiKit.Text("3. 前缀列（Excel 列名）：", 0), _cbPrefix,
-                          UiKit.Hint("取这一列作为新文件名的前缀")),
-                UiKit.Row(UiKit.Text("4. 旧名字列（Excel 列名）：", 0), _cbOld,
-                          UiKit.Hint("对应磁盘上的原文件名，可带或不带扩展名")),
-                UiKit.Row(UiKit.Text("5. 处理行范围：", 0),
-                          UiKit.Text("从第", 0), _txtStartRow, UiKit.Text("行  到第", 0), _txtEndRow,
-                          UiKit.Text("行", 0),
-                          UiKit.Hint("留空=全部；行号含表头行，数据从第 2 行开始")));
+            TableLayoutPanel top = UiKit.Form(215);
+            UiKit.AddField(top, 0, "1. Excel 文件：",
+                UiKit.Field(_txtExcel, UiKit.Button("浏览…", delegate { BrowseExcel(); })));
+            UiKit.AddField(top, 1, "2. 文件所在文件夹：",
+                UiKit.Field(_txtFolder, UiKit.Button("浏览…", delegate { BrowseFolder(); })));
+            UiKit.AddField(top, 2, "3. 前缀列：",
+                UiKit.Field(_cbPrefix, null, UiKit.Hint("取这一列作为新文件名的前缀"), 260));
+            UiKit.AddField(top, 3, "4. 旧名字列：",
+                UiKit.Field(_cbOld, null, UiKit.Hint("对应磁盘上的原文件名"), 260));
+            UiKit.AddField(top, 4, "5. 处理行范围：",
+                UiKit.Field(BuildRowRange(), null, UiKit.Hint("留空=全部，行号含表头行"), 260));
             root.Controls.Add(top, 0, 0);
 
             // ---------- 命名规则 ----------
-            _txtSeparator = UiKit.Input(70);
+            _txtSeparator = UiKit.Input(0);
             _txtSeparator.Text = "_";
-            _txtExtension = UiKit.Input(70);
+            _txtExtension = UiKit.Input(0);
             _txtExtension.Text = "pdf";
             _numPad = new NumericUpDown();
             _numPad.Minimum = 0;
             _numPad.Maximum = 10;
             _numPad.Value = 0;
-            _numPad.Width = 60;
             _numPad.Margin = new Padding(0, 4, 6, 4);
             _rbDupSkip = UiKit.Radio("跳过", true, null);
             _rbDupAuto = UiKit.Radio("自动加序号", false, null);
             _chkClean = UiKit.Check("自动清洗文件名（去首尾空格、替换 \\ / : * ? \" < > | 等非法字符）", true);
             _rbOpRename = UiKit.Radio("直接改名（原文件被改）", true, delegate { ToggleOutput(); });
             _rbOpCopy = UiKit.Radio("复制到新文件夹（原文件保留，推荐）", false, delegate { ToggleOutput(); });
-            _txtOutput = UiKit.Input(420);
+            _txtOutput = UiKit.Input(0);
             _txtOutput.Enabled = false;
             _btnOutput = UiKit.Button("浏览…", delegate { BrowseOutput(); });
             _btnOutput.Enabled = false;
 
-            FlowLayoutPanel rules = UiKit.Column(
-                UiKit.Row(UiKit.Text("连接符：", 0), _txtSeparator,
-                          UiKit.Text("    扩展名：", 0), _txtExtension,
-                          UiKit.Hint("    支持中文连接符（如 _  -  第  号_），扩展名不带点")),
-                UiKit.Row(UiKit.Text("前缀补零：", 0), _numPad,
-                          UiKit.Text("    重名处理：", 0), _rbDupSkip, _rbDupAuto,
-                          UiKit.Hint("    0=不补零；填 3 表示 1 → 001")),
-                UiKit.Row(_chkClean),
-                UiKit.Row(UiKit.Text("操作模式：", 0), _rbOpRename, _rbOpCopy),
-                UiKit.Row(UiKit.Text("输出文件夹：", 0), _txtOutput, _btnOutput));
+            TableLayoutPanel rules = UiKit.Form(120);
+            UiKit.AddField(rules, 0, "连接符：",
+                UiKit.Field(_txtSeparator, null, UiKit.Hint("支持中文（如 _  -  第  号_）"), 300));
+            UiKit.AddField(rules, 1, "扩展名：",
+                UiKit.Field(_txtExtension, null, UiKit.Hint("不带点，如 pdf / docx"), 300));
+            UiKit.AddField(rules, 2, "前缀补零：",
+                UiKit.Field(_numPad, null, UiKit.Hint("0=不补零；填 3 表示 1 → 001"), 300));
+            UiKit.AddField(rules, 3, "重名处理：",
+                UiKit.Field(UiKit.Row(_rbDupSkip, _rbDupAuto), null, UiKit.Hint("新文件名重复时怎么处理"), 300));
+            UiKit.AddFullRow(rules, 4, _chkClean);
+            UiKit.AddField(rules, 5, "操作模式：",
+                UiKit.Field(UiKit.Row(_rbOpRename, _rbOpCopy)));
+            UiKit.AddField(rules, 6, "输出目录：",
+                UiKit.Field(_txtOutput, _btnOutput, UiKit.Hint("仅复制模式需要"), 200));
             root.Controls.Add(UiKit.Section("命名规则", rules), 0, 1);
 
             // ---------- 按钮 ----------
@@ -233,14 +287,41 @@ namespace ExcelBatchRename
             _btnBatch = UiKit.Button("普通批量改名", delegate { new BatchForm().Show(this); });
             _btnExport = UiKit.Button("导出日志", delegate { ExportLog(); });
             _btnClear = UiKit.Button("清空日志", delegate { _ui.Clear(); });
-            FlowLayoutPanel btns = UiKit.Column(
-                UiKit.Row(_btnLoad, _btnPreview, _btnRename, _btnUndo),
-                UiKit.Row(_btnBatch, _btnExport, _btnClear));
-            btns.Margin = new Padding(0, 6, 0, 4);
+            FlowLayoutPanel btns = new FlowLayoutPanel();
+            btns.AutoSize = true;
+            btns.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            btns.WrapContents = true;
+            btns.Margin = new Padding(0, 8, 0, 4);
+            btns.Controls.Add(_btnLoad);
+            btns.Controls.Add(_btnPreview);
+            btns.Controls.Add(_btnRename);
+            btns.Controls.Add(_btnUndo);
+            btns.Controls.Add(_btnBatch);
+            btns.Controls.Add(_btnExport);
+            btns.Controls.Add(_btnClear);
             root.Controls.Add(btns, 0, 2);
 
             // ---------- 进度 + 日志 ----------
             root.Controls.Add(BuildLogPanel(), 0, 3);
+        }
+
+        /// <summary>行范围：两个小输入框 + 文字说明，整体随窗口拉伸</summary>
+        private Control BuildRowRange()
+        {
+            FlowLayoutPanel p = new FlowLayoutPanel();
+            p.AutoSize = true;
+            p.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            p.WrapContents = false;
+            p.Margin = new Padding(0);
+            p.Padding = new Padding(0);
+            p.Controls.Add(UiKit.Text("从第", 0));
+            _txtStartRow.Width = 56;
+            p.Controls.Add(_txtStartRow);
+            p.Controls.Add(UiKit.Text("行  到第", 0));
+            _txtEndRow.Width = 56;
+            p.Controls.Add(_txtEndRow);
+            p.Controls.Add(UiKit.Text("行", 0));
+            return p;
         }
 
         private Control BuildLogPanel()
@@ -658,6 +739,7 @@ namespace ExcelBatchRename
         {
             _timer.Stop();
             _timer.Dispose();
+            _ui.DisposeResources();
             base.OnFormClosing(e);
         }
     }
