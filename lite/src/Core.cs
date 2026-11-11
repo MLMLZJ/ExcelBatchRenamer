@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -669,10 +669,11 @@ namespace ExcelBatchRename
             result.OkCount = cntOk;
             result.MissingCount = cntMiss;
             result.DupCount = cntDup;
-            result.AddLog(string.Format("预览统计：可改名 {0} 个，找不到文件 {1} 个，重名跳过 {2} 个", cntOk, cntMiss, cntDup), "info");
+            result.AddLog(string.Format("预览统计：可改名 {0} 个，找不到文件 {1} 个，重名跳过 {2} 个", cntOk, cntMiss, cntDup),
+                          (cntMiss > 0 || cntDup > 0) ? "warn" : "info");
             if (cntMiss > 0 || cntDup > 0)
-                result.AddLog("存在缺失或重名文件，执行时会再次提示确认", "dup");
-            if (cntOk == 0) result.AddLog("没有任何可改名的文件，请检查文件夹、扩展名和 Excel 内容。", "miss");
+                result.AddLog("⚠ 存在缺失或重名文件，执行时会再次提示确认", "warn");
+            if (cntOk == 0) result.AddLog("✖ 没有任何可改名的文件，请检查文件夹、扩展名和 Excel 内容。", "miss");
             return result;
         }
 
@@ -754,7 +755,7 @@ namespace ExcelBatchRename
             result.OkCount = cntOk;
             result.DupCount = cntDup;
             result.AddLog(string.Format("预览统计：将处理 {0} 个，跳过 {1} 个（其中重名 {2} 个）", cntOk, cntSkip, cntDup), "info");
-            if (cntOk == 0) result.AddLog("没有任何可处理的文件，请检查文件类型过滤和改名规则。", "miss");
+            if (cntOk == 0) result.AddLog("✖ 没有任何可处理的文件，请检查文件类型过滤和改名规则。", "miss");
             return result;
         }
 
