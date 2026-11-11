@@ -62,3 +62,14 @@ $RECYCLE.BIN/
 
 ## Publish output
 publish/
+
+## Lite variant
+lite/dist/
+lite/testdata/
+lite/tests/bin/
+
+## Signing material - NEVER commit
+*.pfx
+*.p12
+*.cer
+*.key
